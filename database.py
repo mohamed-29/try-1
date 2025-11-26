@@ -11,7 +11,7 @@ class DatabaseManager:
         self._init_db()
 
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=10.0) # Increased timeout for safety
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -19,26 +19,22 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             
-            # 1. Command Queue (The Action Table)
-            # Added 'response_payload' to store the exact answer from VMC
+            # 1. Command Queue
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS command_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     command_hex TEXT NOT NULL,
-                    status TEXT DEFAULT 'PENDING',    -- PENDING, SENDING, ACKED, COMPLETED, FAILED
+                    status TEXT DEFAULT 'PENDING',
                     retry_count INTEGER DEFAULT 0,
                     assigned_pack_no INTEGER,
-                    
-                    -- Response Storage
-                    response_payload TEXT,            -- Raw hex received as answer
-                    completion_details TEXT,          -- JSON string with parsed details (e.g. {"error": "Motor Jammed"})
-                    
+                    response_payload TEXT,
+                    completion_details TEXT,
                     created_at REAL DEFAULT (datetime('now', 'localtime')),
                     updated_at REAL DEFAULT (datetime('now', 'localtime'))
                 );
             """)
 
-            # 2. VMC Status (Machine State)
+            # 2. VMC Status
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS vmc_status (
                     key TEXT PRIMARY KEY,
@@ -48,7 +44,7 @@ class DatabaseManager:
                 );
             """)
 
-            # 3. Event Log (Unsolicited Data)
+            # 3. Event Log
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS event_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +52,20 @@ class DatabaseManager:
                     raw_data TEXT,
                     parsed_data TEXT,
                     created_at REAL DEFAULT (datetime('now', 'localtime'))
+                );
+            """)
+
+            # 4. Products Table (NEW for 0x11)
+            # Stores the latest known state of every slot in the machine
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS products (
+                    selection_id INTEGER PRIMARY KEY, -- e.g., 10, 11, 20
+                    price INTEGER,                    -- In cents/lowest unit
+                    inventory INTEGER,
+                    capacity INTEGER,
+                    product_id INTEGER,               -- Internal VMC PID
+                    status INTEGER,                   -- 0=Normal, 1=Paused
+                    updated_at REAL DEFAULT (datetime('now', 'localtime'))
                 );
             """)
             conn.commit()
@@ -80,10 +90,6 @@ class DatabaseManager:
             conn.commit()
 
     def update_command_result(self, cmd_id, status, response_hex=None, details_dict=None):
-        """
-        Updates the command with the final result from the VMC.
-        This links the Response Data back to the Action ID.
-        """
         details_json = json.dumps(details_dict) if details_dict else None
         with self.get_connection() as conn:
             conn.execute("""
@@ -101,7 +107,26 @@ class DatabaseManager:
             conn.commit()
         return status
 
-    # --- Data Logging ---
+    # --- Data & Products ---
+
+    def upsert_product(self, data):
+        """
+        Updates a product slot from a 0x11 report.
+        data: {selection, price, inventory, capacity, product_id, status}
+        """
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO products (selection_id, price, inventory, capacity, product_id, status, updated_at)
+                VALUES (:selection, :price, :inventory, :capacity, :product_id, :status, datetime('now'))
+                ON CONFLICT(selection_id) DO UPDATE SET
+                    price=excluded.price,
+                    inventory=excluded.inventory,
+                    capacity=excluded.capacity,
+                    product_id=excluded.product_id,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, data)
+            conn.commit()
 
     def update_machine_status(self, key, value, raw_hex=None):
         with self.get_connection() as conn:
@@ -120,4 +145,4 @@ class DatabaseManager:
 
 if __name__ == "__main__":
     db = DatabaseManager()
-    print("Database Updated. Ready for Controller.")
+    print("Database Updated with Products Table.")
