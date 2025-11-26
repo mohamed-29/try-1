@@ -55,22 +55,35 @@ class DatabaseManager:
                 );
             """)
 
-            # 4. Products Table (NEW for 0x11)
-            # Stores the latest known state of every slot in the machine
+            # 4. Products Table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS products (
-                    selection_id INTEGER PRIMARY KEY, -- e.g., 10, 11, 20
-                    price INTEGER,                    -- In cents/lowest unit
+                    selection_id INTEGER PRIMARY KEY,
+                    price INTEGER,
                     inventory INTEGER,
                     capacity INTEGER,
-                    product_id INTEGER,               -- Internal VMC PID
-                    status INTEGER,                   -- 0=Normal, 1=Paused
+                    product_id INTEGER,
+                    status INTEGER,
                     updated_at REAL DEFAULT (datetime('now', 'localtime'))
                 );
             """)
             conn.commit()
 
     # --- Command Management ---
+
+    def add_command(self, command_hex):
+        """
+        Adds a new command to the queue.
+        CRITICAL: This method is used by the Flask API.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO command_queue (command_hex, status)
+                VALUES (?, 'PENDING')
+            """, (command_hex,))
+            conn.commit()
+            return cursor.lastrowid
 
     def get_next_command(self):
         with self.get_connection() as conn:
@@ -110,10 +123,6 @@ class DatabaseManager:
     # --- Data & Products ---
 
     def upsert_product(self, data):
-        """
-        Updates a product slot from a 0x11 report.
-        data: {selection, price, inventory, capacity, product_id, status}
-        """
         with self.get_connection() as conn:
             conn.execute("""
                 INSERT INTO products (selection_id, price, inventory, capacity, product_id, status, updated_at)
@@ -145,4 +154,4 @@ class DatabaseManager:
 
 if __name__ == "__main__":
     db = DatabaseManager()
-    print("Database Updated with Products Table.")
+    print("Database Updated. Ready for Controller.")

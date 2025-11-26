@@ -7,7 +7,7 @@ from database import DatabaseManager
 from vmc_commands import ResponseParser, CMD_REPORT_PRODUCT
 
 # --- Configuration ---
-SERIAL_PORT = '/dev/ttyS0' 
+SERIAL_PORT = '/dev/ttyS1' 
 BAUD_RATE = 57600
 TIMEOUT = 0.1 # 100ms Response Window
 
