@@ -152,6 +152,60 @@ def check_command_status(cmd_id):
         "details": row['completion_details'] # JSON string from Serial Controller
     })
 
+# --- NEW SET & QUERY ENDPOINTS ---
+
+@app.route('/api/products/price', methods=['POST'])
+def set_product_price():
+    """
+    Sets the price for a selection.
+    Payload: { "selection": 10, "price": 100 }
+    """
+    data = request.json
+    sel = data.get('selection')
+    price = data.get('price')
+    
+    if sel is None or price is None:
+        return jsonify({"error": "Missing selection or price"}), 400
+    
+    cmd_id = db.add_command(CommandBuilder.set_price(int(sel), int(price)))
+    return jsonify({"status": "queued", "command_id": cmd_id, "action": "SET_PRICE"}), 202
+
+@app.route('/api/products/inventory', methods=['POST'])
+def set_product_inventory():
+    """
+    Sets the inventory count.
+    Payload: { "selection": 10, "inventory": 5 }
+    """
+    data = request.json
+    sel = data.get('selection')
+    inv = data.get('inventory')
+    
+    if sel is None or inv is None:
+        return jsonify({"error": "Missing selection or inventory"}), 400
+    
+    cmd_id = db.add_command(CommandBuilder.set_inventory(int(sel), int(inv)))
+    return jsonify({"status": "queued", "command_id": cmd_id, "action": "SET_INVENTORY"}), 202
+
+@app.route('/api/config/selection/<int:selection_id>', methods=['GET'])
+def query_selection_config(selection_id):
+    """
+    Triggers a live query (0x42) to get the config from the VMC.
+    Returns the command ID to poll.
+    """
+    cmd_id = db.add_command(CommandBuilder.query_selection_config(selection_id))
+    return jsonify({"status": "queued", "command_id": cmd_id, "action": "QUERY_CONFIG"}), 202
+
+@app.route('/api/sales/daily', methods=['GET'])
+def query_daily_sales():
+    """
+    Triggers a query for today's sales (0x43).
+    """
+    # Format YYYYMMDD
+    today_str = time.strftime("%Y%m%d")
+    cmd_id = db.add_command(CommandBuilder.query_daily_sales(today_str))
+    return jsonify({"status": "queued", "command_id": cmd_id, "action": "QUERY_SALES", "date": today_str}), 202
+
+
 # ==============================================================================
 #  SERVER START
 # ==============================================================================

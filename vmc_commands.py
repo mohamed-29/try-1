@@ -3,109 +3,125 @@ import struct
 """
 VMC Protocol V3.0 Command Library
 ---------------------------------
-This module handles:
-1. Generating HEX payloads for commands (to be stored in DB).
-2. Parsing complex binary responses (like 0x11 Product Info).
 """
 
 # --- Command Constants ---
 CMD_CHECK_SELECTION = 0x01
-CMD_DISPENSE        = 0x03  # "Buy"
-CMD_DRIVE_DIRECT    = 0x06  # Drive Motor directly
-CMD_REPORT_PRODUCT  = 0x11  # VMC reporting product info
+CMD_DISPENSE        = 0x03
+CMD_DRIVE_DIRECT    = 0x06
+CMD_REPORT_PRODUCT  = 0x11
 CMD_SET_PRICE       = 0x12
 CMD_SET_INVENTORY   = 0x13
 CMD_SET_CAPACITY    = 0x14
 CMD_SET_PRODUCT_ID  = 0x15
-CMD_POLL_INTERVAL   = 0x16
-CMD_INFO_SYNC       = 0x31  # Force VMC to report all products (0x11)
-CMD_QUERY_STATUS    = 0x51  # Query Temp/Door/etc
-CMD_DEDUCT_MONEY    = 0x64  # Card Deduction
+CMD_QUERY_CONFIG    = 0x42  # Query specific slot details
+CMD_QUERY_SALES     = 0x43  # Daily Sales
+CMD_INFO_SYNC       = 0x31
+CMD_QUERY_STATUS    = 0x51
+CMD_DEDUCT_MONEY    = 0x64
 
 class CommandBuilder:
-    """
-    Generates the RAW PAYLOAD (Cmd + Data) to be inserted into the database.
-    Note: The SerialController will add the PackNO, Length, and Checksum.
-    """
-
     @staticmethod
     def dispense(selection_id):
-        """
-        0x03: Select to buy (Dispense).
-        Payload: 03 + Selection(2 bytes)
-        """
-        # Big Endian for selection number (e.g. 10 -> 0x00 0x0A)
         return struct.pack('>BH', CMD_DISPENSE, selection_id).hex().upper()
 
     @staticmethod
     def deduct_card(amount):
-        """
-        0x64: Deduct Money (or Cancel if amount=0).
-        Payload: 64 + Amount(4 bytes)
-        """
-        # Amount in cents? Assuming int.
         return struct.pack('>BI', CMD_DEDUCT_MONEY, amount).hex().upper()
 
     @staticmethod
     def cancel_transaction():
-        """
-        0x64 with amount 0 = Cancel.
-        """
         return CommandBuilder.deduct_card(0)
 
     @staticmethod
     def sync_info():
-        """
-        0x31: Info Synchronization.
-        Triggers VMC to send 0x11 reports for all slots.
-        """
         return struct.pack('B', CMD_INFO_SYNC).hex().upper()
 
     @staticmethod
     def query_machine_status():
-        """0x51: Query Status"""
         return struct.pack('B', CMD_QUERY_STATUS).hex().upper()
 
-    # --- Setting Commands (Admin) ---
-
+    # --- SET COMMANDS ---
+    
     @staticmethod
     def set_price(selection_id, price):
-        """0x12: Set Price (4 bytes)"""
+        # 0x12 + Selection(2) + Price(4)
         return struct.pack('>BHI', CMD_SET_PRICE, selection_id, price).hex().upper()
 
     @staticmethod
     def set_inventory(selection_id, inventory):
-        """0x13: Set Inventory (1 byte)"""
+        # 0x13 + Selection(2) + Inventory(1)
         return struct.pack('>BHB', CMD_SET_INVENTORY, selection_id, inventory).hex().upper()
 
-class ResponseParser:
-    """
-    Decodes the data body (excluding Header/PackNO) from VMC.
-    """
+    @staticmethod
+    def set_capacity(selection_id, capacity):
+        # 0x14 + Selection(2) + Capacity(1)
+        return struct.pack('>BHB', CMD_SET_CAPACITY, selection_id, capacity).hex().upper()
+
+    # --- QUERY COMMANDS ---
 
     @staticmethod
-    def parse_product_report(data_body):
-        """
-        Parses 0x11 (Page 7).
-        Format: Selection(2) + Price(4) + Inv(1) + Cap(1) + PID(2) + Status(1)
-        Total 11 bytes.
-        """
-        if len(data_body) < 11:
+    def query_selection_config(selection_id):
+        # 0x42 + Selection(2)
+        return struct.pack('>BH', CMD_QUERY_CONFIG, selection_id).hex().upper()
+
+    @staticmethod
+    def query_daily_sales(date_str):
+        # 0x43 + YYYYMMDD (4 bytes BCD or ASCII? PDF says 4 byte. Usually compressed BCD or Int)
+        # Assuming Integer YYYYMMDD for now based on standard VMC protocols
+        try:
+            date_int = int(date_str) # Expects "20231027"
+            return struct.pack('>BI', CMD_QUERY_SALES, date_int).hex().upper()
+        except:
             return None
-        
-        # Unpack Big Endian
+
+class ResponseParser:
+    @staticmethod
+    def parse_product_report(data_body):
+        # Parses 0x11
+        if len(data_body) < 11: return None
         sel, price, inv, cap, pid, status = struct.unpack('>HIBBHB', data_body[:11])
-        
         return {
-            "selection": sel,
-            "price": price,
-            "inventory": inv,
-            "capacity": cap,
-            "product_id": pid,
-            "status": status # 0=Normal, 1=Pause
+            "selection": sel, "price": price, "inventory": inv,
+            "capacity": cap, "product_id": pid, "status": status
         }
 
     @staticmethod
-    def parse_deduction_result(data_body):
-        # 0x64 doesn't return data directly, it triggers 0x21 Money Notice.
-        pass
+    def parse_0x71_generic(data_body):
+        """
+        Parses the multi-purpose 0x71 return command.
+        Structure: [SubCmd] [OpType] [Data...]
+        """
+        if len(data_body) < 3: return None
+        
+        sub_cmd = data_body[0]
+        op_type = data_body[1] # 0x00=Read Success, 0x01=Set Success/Fail usually
+        payload = data_body[2:]
+        
+        result = {"sub_command": sub_cmd, "op_type": op_type}
+
+        # 1. SET CONFIRMATION (Price, Inv, etc.)
+        # Usually OpType 0x01, Status 0x00=Success
+        if sub_cmd in [0x12, 0x13, 0x14, 0x15]:
+            status = payload[0] if len(payload) > 0 else 0xFF
+            result["success"] = (status == 0x00)
+            result["message"] = "Set Success" if status == 0x00 else "Set Failed"
+
+        # 2. QUERY CONFIG (0x42 response)
+        elif sub_cmd == 0x42 and op_type == 0x00:
+            # Format: Price(4)+Inv(1)+Cap(1)+PID(2)+Mode(1)+Drop(1)+Jam(1)+Turn(1)
+            if len(payload) >= 12:
+                price, inv, cap, pid, mode, drop, jam, turn = struct.unpack('>IBBHBBBB', payload[:12])
+                result["data"] = {
+                    "price": price, "inventory": inv, "capacity": cap,
+                    "product_id": pid, "motor_mode": mode
+                }
+
+        # 3. QUERY SALES (0x43 response)
+        elif sub_cmd == 0x43 and op_type == 0x00:
+            # Huge struct. Let's grab just Total Count(4) + Total Amt(4)
+            if len(payload) >= 8:
+                total_count, total_amt = struct.unpack('>II', payload[:8])
+                result["data"] = {"total_sales_count": total_count, "total_revenue": total_amt}
+
+        return result
