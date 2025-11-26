@@ -15,6 +15,7 @@ TIMEOUT = 0.1 # 100ms Response Window
 STX = b'\xFA\xFB'
 CMD_POLL = 0x41
 CMD_ACK = 0x42
+CMD_MACHINE_STATUS = 0x52 # Response to 0x51
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
@@ -92,7 +93,7 @@ class VMCController:
     # ------------------------------------------------------------------
     def parse_vmc_data(self, cmd, payload):
         hex_data = payload.hex().upper()
-        # Remove PackNO (1st byte) 
+        # Remove PackNO (1st byte) for data body
         data_body = payload[1:] if len(payload) > 0 else b''
         
         parsed_info = {}
@@ -109,18 +110,15 @@ class VMCController:
         # --- 4.2 Product Reporting (0x11) ---
         elif cmd == CMD_REPORT_PRODUCT:
             event_type = "PRODUCT_REPORT"
-            # Use our new Part 3 library to parse
+            # Use Part 3 library to parse
             product_data = ResponseParser.parse_product_report(data_body)
             if product_data:
-                # Update the new 'products' table
                 self.db.upsert_product(product_data)
                 parsed_info = product_data
                 logging.debug(f"Updated Product: {product_data['selection']}")
 
         # --- 4.3 Dispensing (Multi-Stage Handling) ---
-        
-        # STAGE 1: Immediate Validation (CMD 0x02)
-        elif cmd == 0x02:
+        elif cmd == 0x02: # Selection Check
             event_type = "SELECTION_CHECK"
             status_code = data_body[0]
             status_map = {0x01: "Normal", 0x02: "Out of Stock", 0x03: "Invalid Selection", 0x04: "Paused"}
@@ -133,8 +131,7 @@ class VMCController:
             elif self.pending_action_id and self.pending_action_type == 0x01:
                 self.db.update_command_result(self.pending_action_id, 'COMPLETED', hex_data, parsed_info)
 
-        # STAGE 2 & 3: Motor Status (CMD 0x04)
-        elif cmd == 0x04: 
+        elif cmd == 0x04: # Dispense Status
             event_type = "DISPENSE_STATUS"
             status_code = data_body[0]
             status_map = {
@@ -154,6 +151,42 @@ class VMCController:
                     final_status = 'COMPLETED' if is_success else 'FAILED'
                     self.db.update_command_result(self.pending_action_id, final_status, hex_data, parsed_info)
 
+        # --- 4.4 Machine Status (0x52) ---
+        # Structure based on PDF Page 16:
+        # [0] BillAcc, [1] CoinAcc, [2] CardReader, [3] TempCtrl, [4] Temp, [5] Door
+        # [6-9] BillChange, [10-13] CoinChange, [14-23] MachineID
+        elif cmd == CMD_MACHINE_STATUS:
+            event_type = "MACHINE_STATUS_FULL"
+            if len(data_body) >= 24:
+                statuses = {
+                    "bill_acceptor": "Error" if data_body[0] != 0 else "Normal",
+                    "coin_acceptor": "Error" if data_body[1] != 0 else "Normal",
+                    "card_reader": "Error" if data_body[2] != 0 else "Normal",
+                    "temp_controller": "Error" if data_body[3] != 0 else "Normal",
+                    "temperature": int(data_body[4]),
+                    "door": "Open" if data_body[5] != 0 else "Closed" 
+                }
+                
+                # Parse 4-byte Integers
+                bill_change = int.from_bytes(data_body[6:10], 'big')
+                coin_change = int.from_bytes(data_body[10:14], 'big')
+                machine_id = data_body[14:24].decode('utf-8', errors='ignore').strip()
+
+                # Update Database individually for granular tracking
+                self.db.update_machine_status("temperature", statuses['temperature'], hex_data)
+                self.db.update_machine_status("door", statuses['door'], hex_data)
+                self.db.update_machine_status("bill_change_amount", bill_change, hex_data)
+                self.db.update_machine_status("coin_change_amount", coin_change, hex_data)
+                self.db.update_machine_status("machine_id", machine_id, hex_data)
+
+                parsed_info = statuses
+                parsed_info["bill_change"] = bill_change
+                parsed_info["coin_change"] = coin_change
+                
+                # If we explicitly asked for this status (0x51), mark command complete
+                if self.pending_action_id and self.pending_action_type == 0x51:
+                    self.db.update_command_result(self.pending_action_id, 'COMPLETED', hex_data, parsed_info)
+
         # --- Fallback ---
         else:
             self.db.log_event(event_type, hex_data)
@@ -167,9 +200,7 @@ class VMCController:
             
             cmd = packet['cmd']
             if cmd == CMD_POLL:
-                # -------------------------------------------------------------
-                # BEST PRACTICE: POLL terminates the previous command context
-                # -------------------------------------------------------------
+                # POLL terminates previous transaction context
                 self.pending_action_id = None
                 self.pending_action_type = None
 
@@ -187,7 +218,7 @@ class VMCController:
                     
                     ack = self.read_packet()
                     if ack and ack['cmd'] == CMD_ACK:
-                        self.db.update_command_result(cmd_id, 'ACKED') # Initial ACK
+                        self.db.update_command_result(cmd_id, 'ACKED')
                         self.current_local_pack_no = (self.current_local_pack_no % 255) + 1
                     else:
                         if self.db.increment_retry(cmd_id, next_cmd['retry_count']) == 'FAILED':
