@@ -6,7 +6,7 @@ from vmc_commands import CommandBuilder
 app = Flask(__name__)
 db = DatabaseManager()
 
-def wait_for_command_result(cmd_id, timeout=15.0):
+def wait_for_command_result(cmd_id, timeout=300.0):
     """
     Blocks the HTTP request until the command is COMPLETED or FAILED.
     This creates a 'Synchronous' feel for the API user.
