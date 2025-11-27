@@ -44,7 +44,7 @@ class DatabaseManager:
                 );
             """)
 
-            # 3. Event Log
+            # 3. Event Log (Significant Events)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS event_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,13 +58,26 @@ class DatabaseManager:
             # 4. Products Table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS products (
-                    selection_id INTEGER PRIMARY KEY,
-                    price INTEGER,
+                    selection_id INTEGER PRIMARY KEY, -- e.g., 10, 11, 20
+                    price INTEGER,                    -- In cents/lowest unit
                     inventory INTEGER,
                     capacity INTEGER,
-                    product_id INTEGER,
-                    status INTEGER,
+                    product_id INTEGER,               -- Internal VMC PID
+                    status INTEGER,                   -- 0=Normal, 1=Paused
                     updated_at REAL DEFAULT (datetime('now', 'localtime'))
+                );
+            """)
+
+            # 5. Packet Log (Traffic Trace) - NEW
+            # Records every single byte (POLL, ACK, DATA, UNKNOWN) for debugging
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS packet_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction TEXT,        -- 'IN' (from VMC) or 'OUT' (to VMC)
+                    packet_type TEXT,      -- 'POLL', 'ACK', 'CMD', 'DATA', 'UNKNOWN'
+                    raw_hex TEXT,          -- Full packet hex including STX/CRC
+                    parsed_details TEXT,   -- Optional JSON breakdown
+                    created_at REAL DEFAULT (datetime('now', 'localtime'))
                 );
             """)
             conn.commit()
@@ -74,7 +87,7 @@ class DatabaseManager:
     def add_command(self, command_hex):
         """
         Adds a new command to the queue.
-        CRITICAL: This method is used by the Flask API.
+        Required by Flask endpoints to insert commands.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -123,6 +136,10 @@ class DatabaseManager:
     # --- Data & Products ---
 
     def upsert_product(self, data):
+        """
+        Updates a product slot from a 0x11 report.
+        data: {selection, price, inventory, capacity, product_id, status}
+        """
         with self.get_connection() as conn:
             conn.execute("""
                 INSERT INTO products (selection_id, price, inventory, capacity, product_id, status, updated_at)
@@ -152,6 +169,22 @@ class DatabaseManager:
             conn.execute("INSERT INTO event_log (event_type, raw_data, parsed_data) VALUES (?, ?, ?)", (event_type, raw_data, parsed_json))
             conn.commit()
 
+    # --- Full Traffic Tracing ---
+
+    def log_packet(self, direction, packet_type, raw_hex, parsed_details=None):
+        """
+        Logs high-frequency serial traffic (POLL, ACK, etc.) for full debugging.
+        direction: 'IN' or 'OUT'
+        packet_type: 'POLL', 'ACK', 'CMD', 'DATA', 'UNKNOWN'
+        """
+        details_json = json.dumps(parsed_details) if parsed_details else None
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO packet_log (direction, packet_type, raw_hex, parsed_details)
+                VALUES (?, ?, ?, ?)
+            """, (direction, packet_type, raw_hex, details_json))
+            conn.commit()
+
 if __name__ == "__main__":
     db = DatabaseManager()
-    print("Database Updated. Ready for Controller.")
+    print("Database Updated with Packet Log table.")    
