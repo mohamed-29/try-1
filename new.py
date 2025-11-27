@@ -162,6 +162,16 @@ def query_daily_sales():
 #  CACHED DATA (Database Reads)
 # ==============================================================================
 
+@app.route('/api/sync', methods=['POST'])
+def force_sync():
+    """
+    Trigger VMC to report all products (Command 0x31).
+    The Serial Controller will catch the 0x11 responses and populate the 'products' table.
+    """
+    hex_payload = CommandBuilder.sync_info()
+    cmd_id = db.add_command(hex_payload)
+    return jsonify({"status": "sync_started", "command_id": cmd_id}), 202
+
 @app.route('/api/products', methods=['GET'])
 def get_products_cached():
     """Reads local DB cache (No VMC delay)."""
